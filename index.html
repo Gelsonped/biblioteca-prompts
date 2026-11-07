@@ -185,6 +185,7 @@ input.key{font:500 18px var(--font-mono);letter-spacing:.06em;text-transform:upp
       <select id="sort">
         <option value="recent">Mais recentes</option>
         <option value="used">Mais usados</option>
+        <option value="last">Usados recentemente</option>
         <option value="az">A–Z</option>
       </select>
     </div>
@@ -272,12 +273,25 @@ input.key{font:500 18px var(--font-mono);letter-spacing:.06em;text-transform:upp
   function dateLabel(iso) { var d = new Date(iso); return isNaN(d) ? '' : d.toLocaleDateString('pt-BR'); }
   function usesLabel(n) { return n ? n + (n === 1 ? ' uso' : ' usos') : ''; }
   function load(k, def) {
-    try { var r = localStorage.getItem(k); return r ? JSON.parse(r) : def; }
-    catch (e) { return k in memStore ? memStore[k] : def; }
+    if (k in memStore) return memStore[k];
+    var r;
+    try { r = localStorage.getItem(k); } catch (e) { return def; }
+    if (!r) return def;
+    try { return JSON.parse(r); }
+    catch (e) {
+      /* dado corrompido: guarda uma cópia bruta antes que o próximo save() sobrescreva */
+      try { localStorage.setItem('bp:corrupt:' + k + ':' + Date.now(), r); } catch (e2) {}
+      return def;
+    }
   }
   function save(k, v) {
-    try { localStorage.setItem(k, JSON.stringify(v)); }
-    catch (e) { memStore[k] = v; if (!S.mem) { S.mem = true; renderBanner(); } }
+    try { localStorage.setItem(k, JSON.stringify(v)); delete memStore[k]; }
+    catch (e) {
+      memStore[k] = v;
+      var quota = !!e && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22 || e.code === 1014);
+      var mode = quota ? 'quota' : 'blocked';
+      if (S.mem !== mode) { S.mem = mode; renderBanner(); }
+    }
   }
   function daysSince(iso) { var d = new Date(iso); return isNaN(d) ? Infinity : (Date.now() - d) / 864e5; }
   function backupDue() {
@@ -376,7 +390,10 @@ input.key{font:500 18px var(--font-mono);letter-spacing:.06em;text-transform:upp
     });
   }
   function rememberVars() {
-    Object.keys(S.fill).forEach(function (k) { if (canRemember(k) && filled(S.fill, k)) S.vars[k] = S.fill[k]; });
+    Object.keys(S.fill).forEach(function (k) {
+      if (!canRemember(k)) return;
+      if (filled(S.fill, k)) S.vars[k] = S.fill[k]; else delete S.vars[k]; /* campo esvaziado = esquecer */
+    });
     save(K.vars, S.vars);
   }
 
@@ -487,9 +504,24 @@ input.key{font:500 18px var(--font-mono);letter-spacing:.06em;text-transform:upp
       });
     }
     if (S.sort === 'used') a.sort(function (x, y) { return (mt(y.id).uses - mt(x.id).uses) || (y.updated > x.updated ? 1 : (y.updated < x.updated ? -1 : 0)); });
+    else if (S.sort === 'last') a.sort(function (x, y) {
+      var lx = str(mt(x.id).lastUsed), ly = str(mt(y.id).lastUsed);
+      return (ly > lx ? 1 : (ly < lx ? -1 : 0)) || x.title.localeCompare(y.title, 'pt-BR');
+    });
     else if (S.sort === 'az') a.sort(function (x, y) { return x.title.localeCompare(y.title, 'pt-BR'); });
     else a.sort(function (x, y) { return y.updated > x.updated ? 1 : (y.updated < x.updated ? -1 : 0); });
     return a;
+  }
+
+  /* prévia do cartão: campos {{x}} viram ‹x›, corte em limite de palavra e com reticências */
+  function snippet(text) {
+    var t = text.replace(/\{\{\s*([^{}\n]{1,60}?)\s*\}\}/g, '‹$1›').replace(/\s+/g, ' ').trim();
+    if (t.length <= 220) return t;
+    var cut = t.slice(0, 220), sp = cut.lastIndexOf(' ');
+    if (sp > 150) cut = cut.slice(0, sp);
+    var open = cut.lastIndexOf('‹');
+    if (open > cut.lastIndexOf('›')) cut = cut.slice(0, open);
+    return cut.replace(/[\s,;:.\-–(‹]+$/, '') + '…';
   }
 
   function card(p) {
@@ -502,7 +534,7 @@ input.key{font:500 18px var(--font-mono);letter-spacing:.06em;text-transform:upp
     return h('article', { class: 'card', 'data-id': p.id },
       h('p', { class: 'meta' }, p.cat || 'Sem categoria', p.tool ? h('span', { class: 'tool', text: p.tool }) : null),
       h('h3', null, h('button', { class: 'title-link', type: 'button', text: p.title, onclick: function () { openView(p.id); } })),
-      h('p', { class: 'snippet', text: p.text.replace(/\s+/g, ' ').trim().slice(0, 220) }),
+      h('p', { class: 'snippet', text: snippet(p.text) }),
       p.tags.length ? h('div', { class: 'tags' }, p.tags.map(function (t) { return h('span', { text: '#' + t }); })) : null,
       h('div', { class: 'card-foot' },
         hasVars
@@ -552,7 +584,7 @@ input.key{font:500 18px var(--font-mono);letter-spacing:.06em;text-transform:upp
 
   function catRank(c) { var i = CAT_ORDER.indexOf(c); return c === 'Sem categoria' ? 100 : (i < 0 ? 50 : i); }
   function renderCats() {
-    var counts = {}, all = items(), fav = 0, mine = 0;
+    var counts = Object.create(null), all = items(), fav = 0, mine = 0;
     all.forEach(function (p) {
       var c = p.cat || 'Sem categoria'; counts[c] = (counts[c] || 0) + 1;
       if (mt(p.id).fav) fav++;
@@ -576,7 +608,7 @@ input.key{font:500 18px var(--font-mono);letter-spacing:.06em;text-transform:upp
   }
 
   function renderTools() {
-    var sel = $('#tool'), set = {};
+    var sel = $('#tool'), set = Object.create(null);
     items().forEach(function (p) { if (p.tool) set[p.tool] = 1; });
     var names = Object.keys(set).sort(function (a, b) { return a.localeCompare(b, 'pt-BR'); });
     if (S.tool && !set[S.tool]) S.tool = '';
@@ -586,7 +618,7 @@ input.key{font:500 18px var(--font-mono);letter-spacing:.06em;text-transform:upp
   }
 
   function renderHeader() {
-    var all = items(), cats = {};
+    var all = items(), cats = Object.create(null);
     all.forEach(function (p) { cats[p.cat || 'Sem categoria'] = 1; });
     var n = all.length, c = Object.keys(cats).length;
     $('#sub').textContent = n + (n === 1 ? ' prompt' : ' prompts') + ' · ' + c + (c === 1 ? ' categoria' : ' categorias') +
@@ -616,7 +648,9 @@ input.key{font:500 18px var(--font-mono);letter-spacing:.06em;text-transform:upp
       h('div', { class: 'btn-row' },
         h('button', { class: 'btn primary small', type: 'button', text: 'Fazer backup', onclick: function () { S.lastFocus = document.activeElement; openBackup(); } }),
         h('button', { class: 'btn small', type: 'button', text: 'Lembrar depois', onclick: function () { save(K.snooze, nowIso()); renderBanner(); } }))));
-    if (S.mem) kids.push(h('p', { class: 'warn', text: 'Este navegador bloqueou o armazenamento: seus prompts somem ao fechar a página. Use Backup para não perder nada.' }));
+    if (S.mem) kids.push(h('p', { class: 'warn', text: S.mem === 'quota'
+      ? 'O armazenamento do navegador está cheio: as últimas alterações não foram salvas e somem ao fechar a página. Faça um backup agora e libere espaço.'
+      : 'Este navegador bloqueou o armazenamento: seus prompts somem ao fechar a página. Use Backup para não perder nada.' }));
     b.replaceChildren.apply(b, kids);
     b.hidden = !kids.length;
   }
@@ -746,7 +780,7 @@ input.key{font:500 18px var(--font-mono);letter-spacing:.06em;text-transform:upp
     delete S.meta[id]; save(K.mine, S.mine); save(K.meta, S.meta); render();
   }
   function allCats() {
-    var set = {}; CAT_ORDER.forEach(function (c) { set[c] = 1; });
+    var set = Object.create(null); CAT_ORDER.forEach(function (c) { set[c] = 1; });
     items().forEach(function (p) { if (p.cat) set[p.cat] = 1; });
     return Object.keys(set).sort(function (a, b) { return (catRank(a) - catRank(b)) || a.localeCompare(b, 'pt-BR'); });
   }
@@ -810,26 +844,43 @@ input.key{font:500 18px var(--font-mono);letter-spacing:.06em;text-transform:upp
   }
   function exportJson() {
     var list = S.mine.map(function (p) { var o = Object.assign({}, p, { fav: mt(p.id).fav, uses: mt(p.id).uses }); delete o.src; return o; });
-    return JSON.stringify({ app: 'biblioteca-de-prompts', version: 2, exportedAt: nowIso(), prompts: list }, null, 2);
+    /* favoritos e contadores dos prompts da amostra/biblioteca (ids estáveis: s1…, L…) */
+    var libMeta = {};
+    S.samples.concat(S.lib).forEach(function (p) {
+      var m = mt(p.id);
+      if (m.fav || m.uses) libMeta[p.id] = { fav: !!m.fav, uses: m.uses };
+    });
+    return JSON.stringify({ app: 'biblioteca-de-prompts', version: 2, exportedAt: nowIso(), prompts: list, libMeta: libMeta }, null, 2);
   }
   function importData(raw) {
     var data;
     try { data = JSON.parse(raw); } catch (e) { return { error: 'Esse texto não é um backup válido (JSON).' }; }
     var list = Array.isArray(data) ? data : (data && Array.isArray(data.prompts) ? data.prompts : null);
     if (!list) return { error: 'Não encontrei prompts nesse conteúdo.' };
-    var added = 0, skipped = 0, keys = {};
+    var added = 0, skipped = 0, keys = Object.create(null), restored = 0;
     function key(p) { return norm(p.title) + '|' + norm(p.text); }
     S.mine.forEach(function (p) { keys[key(p)] = 1; });
     list.slice(0, 2000).forEach(function (x) {
       if (!x || typeof x !== 'object' || !str(x.text).trim()) { skipped++; return; }
       var it = clean(Object.assign({}, x, { id: uid() }), 'mine');
+      it.cat = canonCat(it.cat); /* "vendas" e "Vendas" viram a mesma categoria */
       if (keys[key(it)]) { skipped++; return; }
       keys[key(it)] = 1; S.mine.push(it);
       S.meta[it.id] = { fav: !!x.fav, uses: Math.max(0, Number(x.uses) || 0) };
       added++;
     });
-    if (added) { save(K.mine, S.mine); save(K.meta, S.meta); render(); }
-    return { added: added, skipped: skipped };
+    /* restaura favoritos e usos dos prompts da amostra/biblioteca, sem apagar o que já existe aqui */
+    var lm = (data && !Array.isArray(data) && data.libMeta && typeof data.libMeta === 'object') ? data.libMeta : null;
+    if (lm) Object.keys(lm).slice(0, 500).forEach(function (id) {
+      if (!/^(s\d{1,3}|L[\w-]{1,40})$/.test(id) || !lm[id] || typeof lm[id] !== 'object') return;
+      var cur = mt(id), uses = Math.max(0, Number(lm[id].uses) || 0), fav = !!lm[id].fav;
+      if ((fav && !cur.fav) || uses > cur.uses) {
+        S.meta[id] = Object.assign({}, S.meta[id], { fav: cur.fav || fav, uses: Math.max(cur.uses, uses) });
+        restored++;
+      }
+    });
+    if (added || restored) { save(K.mine, S.mine); save(K.meta, S.meta); render(); }
+    return { added: added, skipped: skipped, restored: restored };
   }
   function openBackup() {
     S.panel = 'backup'; S.openId = null; S.dirty = false;
@@ -846,7 +897,7 @@ input.key{font:500 18px var(--font-mono);letter-spacing:.06em;text-transform:upp
       head(null, 'Backup'),
       h('div', { class: 'section' },
         h('h3', { text: 'Exportar' }),
-        h('p', { class: 'hint', text: 'O backup guarda apenas “Meus prompts” (' + n + (n === 1 ? ' prompt' : ' prompts') + '). A biblioteca completa volta com a sua chave de acesso.' + (S.persisted === false ? ' Atenção: o navegador pode apagar os dados do app se faltar espaço no aparelho, então faça backup com frequência.' : '') }),
+        h('p', { class: 'hint', text: 'O backup guarda “Meus prompts” (' + n + (n === 1 ? ' prompt' : ' prompts') + '), além dos favoritos e usos da biblioteca. Os textos da biblioteca completa voltam com a sua chave de acesso.' + (S.persisted === false ? ' Atenção: o navegador pode apagar os dados do app se faltar espaço no aparelho, então faça backup com frequência.' : '') }),
         h('div', { class: 'btn-row' },
           h('button', { class: 'btn primary', id: 'bk-first', type: 'button', text: 'Baixar backup (.json)', onclick: function () {
             if (!n) { msg.textContent = 'Você ainda não tem prompts próprios para exportar.'; return; }
@@ -864,7 +915,7 @@ input.key{font:500 18px var(--font-mono);letter-spacing:.06em;text-transform:upp
         h('div', { class: 'btn-row' }, h('button', { class: 'btn', type: 'button', text: 'Importar', onclick: function () {
           if (!area.value.trim()) { msg.textContent = 'Escolha um arquivo ou cole o conteúdo antes.'; return; }
           var r = importData(area.value);
-          msg.textContent = r.error ? r.error : r.added + (r.added === 1 ? ' prompt importado' : ' prompts importados') + (r.skipped ? ', ' + r.skipped + ' ignorados.' : '.');
+          msg.textContent = r.error ? r.error : r.added + (r.added === 1 ? ' prompt importado' : ' prompts importados') + (r.skipped ? ', ' + r.skipped + ' ignorados' : '') + (r.restored ? ', ' + r.restored + ' favoritos/usos restaurados' : '') + '.';
           if (!r.error) area.value = '';
         } }))),
       msg
@@ -946,13 +997,22 @@ input.key{font:500 18px var(--font-mono);letter-spacing:.06em;text-transform:upp
   });
 
   /* ===== início ===== */
+  function readStore() {
+    var m = load(K.mine, []), me = load(K.meta, {}), v = load(K.vars, {});
+    S.mine = (Array.isArray(m) ? m : []).filter(function (x) { return x && typeof x === 'object'; }).map(function (x) { return clean(x, 'mine'); });
+    S.meta = (me && typeof me === 'object' && !Array.isArray(me)) ? me : {};
+    S.vars = (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+    Object.keys(S.vars).forEach(function (k) { if (!canRemember(k)) delete S.vars[k]; });
+  }
   function boot() {
     S.samples = SAMPLES.map(function (x) { return clean(Object.assign({ created: D0, updated: D0 }, x), 'sample'); });
-    S.mine = (load(K.mine, []) || []).map(function (x) { return clean(x, 'mine'); });
-    S.meta = load(K.meta, {}) || {};
-    S.vars = load(K.vars, {}) || {};
-    Object.keys(S.vars).forEach(function (k) { if (!canRemember(k)) delete S.vars[k]; });
+    readStore();
     save(K.vars, S.vars);
+    /* outra aba mudou os dados: recarrega o estado em vez de sobrescrevê-lo depois */
+    addEventListener('storage', function (e) {
+      if (e.key !== K.mine && e.key !== K.meta && e.key !== K.vars) return;
+      readStore(); render();
+    });
     try { S.vault = JSON.parse($('#vault').textContent); } catch (e) { S.vault = null; }
     if (S.vault && (!S.vault.keys || !S.vault.data)) S.vault = null;
     paintTheme();
@@ -960,7 +1020,13 @@ input.key{font:500 18px var(--font-mono);letter-spacing:.06em;text-transform:upp
     var lic = load(K.lic, null);
     S.checking = !!(S.vault && lic);
     render();
-    if (S.checking) activate(lic).then(finish, finish);
+    if (S.checking) activate(lic).then(finish, function (er) {
+      /* chave salva que o cofre não aceita mais (ex.: build novo): limpa e avisa, em vez de ficar bloqueado sem explicação */
+      var rejected = /^Chave inválida/.test(str(er));
+      if (rejected) drop(K.lic);
+      finish();
+      if (rejected) toast('Sua licença salva não vale mais neste build. Insira a chave de novo.');
+    });
     function finish() { S.checking = false; render(); }
   }
   boot();

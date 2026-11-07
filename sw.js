@@ -1,4 +1,4 @@
-const VERSION = "bp-v2";
+const VERSION = "bp-v3";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png"];
 const OPTIONAL = ["./icons/icon-maskable-512.png"];
 const NETWORK_TIMEOUT = 3000;
